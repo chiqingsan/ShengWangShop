@@ -80,7 +80,23 @@ public static class MenPaiShopPatch
 		}
 		try
 		{
-			RefreshUIWithLingShi(__instance);
+			string sceneName = string.IsNullOrEmpty(OverrideShopScene) ? SceneEx.NowSceneName : OverrideShopScene;
+			List<NomelShopJsonData> list = NomelShopJsonData.DataList.FindAll((NomelShopJsonData d) => $"S{d.threeScene}" == sceneName);
+			if (list.Count == 0)
+			{
+				// 此场景无商店数据，交回原版处理
+				_renderedShopKey = null;
+				return true;
+			}
+			// 只接管门派药房（SType=3，五大门派"XX库房"）。藏宝阁（SType=4）、藏经阁/秘阁
+			// （SType=1）、神兵阁（SType=2）与药房共用 UIMenPaiShop 面板，其兑换货币只能通过
+			// 特定事件获得，不属于"贡献货币"，保持原版行为
+			if (list[0].SType != 3)
+			{
+				_renderedShopKey = null;
+				return true;
+			}
+			RefreshUIWithLingShi(__instance, sceneName, list);
 		}
 		catch (Exception e)
 		{
@@ -98,15 +114,8 @@ public static class MenPaiShopPatch
 	/// </summary>
 	private static string _renderedShopKey;
 
-	private static void RefreshUIWithLingShi(UIMenPaiShop shop)
+	private static void RefreshUIWithLingShi(UIMenPaiShop shop, string sceneName, List<NomelShopJsonData> list)
 	{
-		string sceneName = string.IsNullOrEmpty(OverrideShopScene) ? SceneEx.NowSceneName : OverrideShopScene;
-		List<NomelShopJsonData> list = NomelShopJsonData.DataList.FindAll((NomelShopJsonData d) => $"S{d.threeScene}" == sceneName);
-		if (list.Count == 0)
-		{
-			Debug.LogError((object)"声望药房：UIMenPaiShop刷新UI异常，此场景没有商品信息");
-			return;
-		}
 		// 原版硬编码 3 页，这里防御数据不足 3 条的场景
 		int pageCount = Mathf.Min(3, list.Count);
 		List<List<jiaoHuanShopGoods>> pages = new List<List<jiaoHuanShopGoods>>(pageCount);
