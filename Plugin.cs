@@ -6,7 +6,7 @@ using HarmonyLib;
 
 namespace ShengWangShop;
 
-[BepInPlugin("chiqingsan.mcs.ShengWangShop", "声望药房", "1.0.0")]
+[BepInPlugin("chiqingsan.mcs.ShengWangShop", "声望药房", "1.1.0")]
 public class Plugin : BaseUnityPlugin
 {
 	internal static ManualLogSource Log;
@@ -40,7 +40,7 @@ public class Plugin : BaseUnityPlugin
 			Harmony.CreateAndPatchAll(typeof(MenPaiShopPatch), null);
 			Harmony.CreateAndPatchAll(typeof(MenPaiShopClosePatch), null);
 			Harmony.CreateAndPatchAll(typeof(SectVisitOptionPatch), null);
-			Log.LogInfo($"声望药房已加载：宁州声望等级 ≥ {Config_MinShengWangLevel.Value} 时，门派药房（XX库房）改用灵石购买，并在拜访门派菜单中提供\"购买药材\"入口");
+			Log.LogInfo($"声望药房已加载：宁州声望等级 ≥ {Config_MinShengWangLevel.Value} 时，五大门派库房改用灵石购买；菜单提供\"购买药材\"入口；并修复灵石定价商店（如碎星商会库房）经场景按钮打开时不显示、不可买的问题");
 		}
 		catch (Exception e)
 		{

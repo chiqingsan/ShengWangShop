@@ -12,29 +12,43 @@ using UnityEngine.UI;
 namespace ShengWangShop;
 
 /// <summary>
-/// 宁州声望达到指定等级（默认 6 = 声名远扬）后，接管门派药房（UIMenPaiShop，
-/// 五大门派场景的"XX库房"）的 RefreshUI：支付货币由本门贡献货币（沧元丹/元灵石/
-/// 寒玉/火晶/砂晶）改为灵石，价格按原版隐含换算 1 贡献 = 100 灵石。
+/// 接管门派商店面板（UIMenPaiShop.RefreshUI），处理两类"用灵石支付"的场景：
 ///
-/// 原版行为：任何人都能打开药房查看，但货币是各门派贡献货币，非本门弟子没有
-/// 货币，只能看不能买。声望未达标时本补丁不介入，行为与原版完全一致。
+/// ① 五大门派库房换算（需宁州声望达标，默认 ≥ 6 声名远扬）：
+///    支付货币由本门贡献货币（沧元丹/元灵石/寒玉/火晶/砂晶）改为灵石，
+///    价格按原版隐含换算 1 贡献 = 100 灵石（即物品底价）。
+///    例：一袋银月花 = 18 沧元丹 = 1800 灵石。
+///
+/// ② 原生以灵石定价的商店（第三方 mod 新增，如"碎星商会库房"）：
+///    修复原版面板的限制——原版按"背包物品"查询货币数量（getItemNum），
+///    而灵石存在 Player.money 钱包字段、不是背包物品，导致这类商店经场景
+///    按钮打开时货币栏显示 0、且无法购买。本补丁识别后用灵石正常计价与
+///    购买，价格保持商店数据原定义（不做换算）。
+///
+/// 换算范围严格限定为五大门派库房（按计价货币判断）；其他共用该面板的商店
+/// （藏宝阁、藏经阁/秘阁、神兵阁，以及第三方库房如白帝楼库房"剑玉"等）
+/// 一律保持原版行为。声望未达标时五大门派库房同样保持原版（贡献货币）。
 ///
 /// 渲染流程复刻原版 UIMenPaiShop.RefreshUI，仅支付路径不同：
-///   原版  Player.getItemNum(贡献货币) / removeItem(贡献货币, 总价)
-///   本版  (int)Player.money           / Player.AddMoney(-总价)
-/// （灵石不是背包物品，走 money 字段，与游戏自带兑换商店 UIDuiHuanShop 的
-///   EXGoodsID == 10035 分支一致。）
+///   原版  Player.getItemNum(货币) / removeItem(货币, 总价)
+///   本版  (int)Player.money     / Player.AddMoney(-总价)
+/// （与游戏自带兑换商店 UIDuiHuanShop 对 EXGoodsID == 10035 的官方分支一致。）
 /// </summary>
 [HarmonyPatch(typeof(UIMenPaiShop), "RefreshUI")]
 public static class MenPaiShopPatch
 {
-	/// <summary>灵石物品 ID（配表 d_items.py.items.json，type 7 货币类）。</summary>
+	/// <summary>灵石物品 ID（配表 d_items.py.items.json，type 7 货币类；实际数量存于 Player.money 字段）。</summary>
 	private const int LingShiItemId = 10035;
 
-	/// <summary>
-	/// 1 点门派贡献货币折合的灵石数（药房 percent=100，物品底价的 1% 用贡献支付）。
-	/// </summary>
+	/// <summary>1 点门派贡献货币折合的灵石数（五大门派库房 percent=100，物品底价的 1% 用贡献支付）。</summary>
 	private const int LingShiPerContribution = 100;
+
+	/// <summary>
+	/// 五大门派贡献货币：沧元丹(竹山宗 10010) / 元灵石(金虹剑派 10011) / 寒玉(星河剑派 10012)
+	/// / 火晶(离火门 10013) / 砂晶(化尘教 10014)。只有这些货币的库房才做贡献价换算，
+	/// 用于排除第三方 mod 新增的同面板商店（如白帝楼库房的"剑玉"）。
+	/// </summary>
+	private static readonly HashSet<int> SectContributionCurrencies = new HashSet<int> { 10010, 10011, 10012, 10013, 10014 };
 
 	/// <summary>
 	/// 玩家持有灵石数。money 是 ulong 字段，但游戏自身（AddMoney 等）按 int 域运算，
@@ -72,12 +86,6 @@ public static class MenPaiShopPatch
 			_renderedShopKey = null;
 			return true;
 		}
-		if (PlayerEx.GetNingZhouShengWangLevel() < Plugin.Config_MinShengWangLevel.Value)
-		{
-			// 走原版渲染（贡献货币）时清除缓存标识，避免下次达标后误复用原版面
-			_renderedShopKey = null;
-			return true;
-		}
 		try
 		{
 			string sceneName = string.IsNullOrEmpty(OverrideShopScene) ? SceneEx.NowSceneName : OverrideShopScene;
@@ -88,19 +96,33 @@ public static class MenPaiShopPatch
 				_renderedShopKey = null;
 				return true;
 			}
-			// 只接管门派药房（SType=3，五大门派"XX库房"）。藏宝阁（SType=4）、藏经阁/秘阁
-			// （SType=1）、神兵阁（SType=2）与药房共用 UIMenPaiShop 面板，其兑换货币只能通过
-			// 特定事件获得，不属于"贡献货币"，保持原版行为
-			if (list[0].SType != 3)
+			int pageCount = Mathf.Min(3, list.Count);
+			int currency = GetUniformCurrency(list, pageCount);
+			if (list[0].SType == 3 && SectContributionCurrencies.Contains(currency))
 			{
+				// ① 五大门派库房：声望未达标时保持原版（贡献货币）
+				if (PlayerEx.GetNingZhouShengWangLevel() < Plugin.Config_MinShengWangLevel.Value)
+				{
+					_renderedShopKey = null;
+					return true;
+				}
+				RefreshShopWithLingShi(__instance, sceneName, list, LingShiPerContribution);
+			}
+			else if (currency == LingShiItemId)
+			{
+				// ② 原生灵石计价商店：不改价格，仅补齐原版缺失的灵石钱包支持
+				RefreshShopWithLingShi(__instance, sceneName, list, 1);
+			}
+			else
+			{
+				// 其他商店（藏宝阁/藏经阁/秘阁/神兵阁/第三方非贡献货币库房等）：保持原版
 				_renderedShopKey = null;
 				return true;
 			}
-			RefreshUIWithLingShi(__instance, sceneName, list);
 		}
 		catch (Exception e)
 		{
-			Plugin.Log.LogError("灵石药房渲染失败，回退原版逻辑：" + e);
+			Plugin.Log.LogError("灵石商店渲染失败，回退原版逻辑：" + e);
 			_renderedShopKey = null;
 			return true;
 		}
@@ -108,18 +130,53 @@ public static class MenPaiShopPatch
 	}
 
 	/// <summary>
-	/// 上次渲染的"场景 + 商品集合"标识。与当前一致且面板已有内容时跳过 UI 重建，
+	/// 商店的计价货币（EXGoodsID）。面板按单一货币渲染（顶部只显示一种货币），
+	/// 因此要求本场景各页商品货币一致；有任何不一致或商品为空时返回 0，
+	/// 交由原版处理（例如灵界"蜀山剑派藏宝阁"多页货币不同的商店）。
+	/// </summary>
+	private static int GetUniformCurrency(List<NomelShopJsonData> list, int pageCount)
+	{
+		int currency = 0;
+		for (int i = 0; i < pageCount; i++)
+		{
+			List<jiaoHuanShopGoods> goods = UIDuiHuanShop.GetShopGoods(list[i].ExShopID);
+			if (goods.Count == 0)
+			{
+				return 0;
+			}
+			foreach (jiaoHuanShopGoods g in goods)
+			{
+				if (currency == 0)
+				{
+					currency = g.EXGoodsID;
+				}
+				else if (currency != g.EXGoodsID)
+				{
+					return 0;
+				}
+			}
+		}
+		return currency;
+	}
+
+	/// <summary>
+	/// 上次渲染的"计价模式 + 场景 + 商品集合"标识。与当前一致且面板已有内容时跳过 UI 重建，
 	/// 只刷新灵石数字（重建约 30 个商品对象（Instantiate + Destroy）是打开面板卡顿的主要来源；
-	/// 药房商品固定、无库存概念，可安全复用）。
+	/// 商店商品固定、无库存概念，可安全复用）。
 	/// </summary>
 	private static string _renderedShopKey;
 
-	private static void RefreshUIWithLingShi(UIMenPaiShop shop, string sceneName, List<NomelShopJsonData> list)
+	/// <summary>
+	/// 渲染商店面板。priceMultiplier：五大门派库房为 LingShiPerContribution（贡献价 ×100 换算），
+	/// 原生灵石商店为 1（价格保持商店数据原定义）。
+	/// </summary>
+	private static void RefreshShopWithLingShi(UIMenPaiShop shop, string sceneName, List<NomelShopJsonData> list, int priceMultiplier)
 	{
 		// 原版硬编码 3 页，这里防御数据不足 3 条的场景
 		int pageCount = Mathf.Min(3, list.Count);
 		List<List<jiaoHuanShopGoods>> pages = new List<List<jiaoHuanShopGoods>>(pageCount);
-		StringBuilder keyBuilder = new StringBuilder(sceneName, 64);
+		StringBuilder keyBuilder = new StringBuilder(64);
+		keyBuilder.Append(priceMultiplier).Append('|').Append(sceneName);
 		for (int i = 0; i < pageCount; i++)
 		{
 			List<jiaoHuanShopGoods> goods = UIDuiHuanShop.GetShopGoods(list[i].ExShopID);
@@ -150,19 +207,19 @@ public static class MenPaiShopPatch
 		ItemDatebase itemDb = jsonData.instance.GetComponent<ItemDatebase>();
 		for (int i = 0; i < pageCount; i++)
 		{
-			NomelShopJsonData nomelShopJsonData = list[i];
-			shop.ShopName[i].text = nomelShopJsonData.ChildTitle;
+			NomelShopJsonData page = list[i];
+			shop.ShopName[i].text = page.ChildTitle;
 			List<jiaoHuanShopGoods> shopGoods = pages[i];
 			((Transform)(object)shop.ShopRT[i]).DestoryAllChild();
 			foreach (jiaoHuanShopGoods good in shopGoods)
 			{
 				_ItemJsonData item = _ItemJsonData.DataDict[good.GoodsID];
-				if (nomelShopJsonData.SType == 1 && levelType < item.quality && (item.type == 3 || item.type == 4))
+				if (page.SType == 1 && levelType < item.quality && (item.type == 3 || item.type == 4))
 				{
 					continue;
 				}
 				UIMenPaiShopItem component = UnityEngine.Object.Instantiate<GameObject>(shop.UIMenPaiShopItemPrefab, (Transform)(object)shop.ShopRT[i]).GetComponent<UIMenPaiShopItem>();
-				int price = CalcLingShiPrice(item, good);
+				int price = CalcLingShiPrice(item, good, priceMultiplier);
 				component.PriceText.text = price.ToString();
 				component.PriceIcon.sprite = itemDb.items[LingShiItemId].itemIconSprite;
 				component.IconShow.SetItem(good.GoodsID);
@@ -203,21 +260,23 @@ public static class MenPaiShopPatch
 	}
 
 	/// <summary>
-	/// 灵石价 = 原版贡献价（ceil(item.price / percent)）× 100。
+	/// 灵石价 = ceil(物品底价 / percent) × priceMultiplier。
+	/// 五大门派库房：percent=100、multiplier=100 → 贡献价 ×100（1 贡献 = 100 灵石）；
+	/// 原生灵石商店：multiplier=1 → 商店数据定义的价格。
 	/// percent &lt;= 0 时（配表异常的防御）直接按物品底价计。
 	/// </summary>
-	private static int CalcLingShiPrice(_ItemJsonData item, jiaoHuanShopGoods good)
+	private static int CalcLingShiPrice(_ItemJsonData item, jiaoHuanShopGoods good, int priceMultiplier)
 	{
 		if (good.percent <= 0)
 		{
 			return item.price;
 		}
-		int contributionPrice = item.price / good.percent;
+		int basePrice = item.price / good.percent;
 		if (item.price % good.percent > 0)
 		{
-			contributionPrice++;
+			basePrice++;
 		}
-		return contributionPrice * LingShiPerContribution;
+		return basePrice * priceMultiplier;
 	}
 
 	private static void BuyItem(int goodsId, int price, int num)
@@ -231,7 +290,7 @@ public static class MenPaiShopPatch
 		}
 		PlayerEx.Player.AddMoney(-(int)need);
 		PlayerEx.Player.addItem(goodsId, num, Tools.CreateItemSeid(goodsId));
-		// 增量刷新：药房商品固定且无库存概念，购买后只需更新顶部灵石数字；
+		// 增量刷新：商店商品固定且无库存概念，购买后只需更新顶部灵石数字；
 		// 不调用 UIMenPaiShop.Inst.RefreshUI()（会销毁重建整个面板，造成每次购买的卡顿感）
 		if ((UnityEngine.Object)UIMenPaiShop.Inst != (UnityEngine.Object)null && (UnityEngine.Object)UIMenPaiShop.Inst.MoneyText != (UnityEngine.Object)null)
 		{
